@@ -1,0 +1,1259 @@
+defpackage webgen :
+  import core
+  import collections
+  import stz/algorithms
+
+#use-added-syntax(webgen)
+
+;============================================================
+;===================== ExpList ==============================
+;============================================================
+
+public deftype ExpList <: Seqable & Lengthable
+public defmulti head (e:ExpList) -> Exp
+public defmulti tail (e:ExpList) -> ExpList
+public defmulti empty? (e:ExpList) -> True|False
+
+;                    Core Types
+;                    ==========
+
+;Empty List
+public defstruct EmptyExpList <: ExpList
+
+;Cons List
+public defstruct ConsList <: ExpList :
+  head: Exp with: (as-method => true)
+  tail: ExpList with: (as-method => true)
+
+;Append List
+public defstruct AppendList <: ExpList :
+  a: ExpList
+  b: ExpList
+
+;Char List
+public defstruct CharList <: ExpList :
+  chars: StringBuffer
+  n: Int
+
+defmethod print (o:OutputStream, e:ExpList) :
+  match(e) :
+    (e:EmptyExpList) :
+      false
+    (e:ConsList) :
+      print(o, head(e))
+      print(o, tail(e))
+    (e:AppendList) :
+      print(o, a(e))
+      print(o, b(e))
+    (e:CharList) :
+      for i in (n(e) - 1) through 0 by -1 do :
+        print(o, chars(e)[i])
+
+;                     Creation
+;                     ========
+
+public defn ExpList () :
+  EmptyExpList()
+
+public defn ExpList (e:Exp) :
+  cons(e, ExpList())
+
+public defn CharList (s:String) :
+  if empty?(s) :
+    ExpList()
+  else :  
+    val chars = StringBuffer()
+    for i in (length(s) - 1) through 0 by -1 do :
+      add(chars, s[i])
+    CharList(chars, length(s))
+
+public defn cons (e:Exp, es:ExpList) -> ExpList :
+  match(e:CharExp) :
+    if-open-charlist?(es,
+      fn* (es) :
+        add(chars(es), char(e))
+        CharList(chars(es), n(es) + 1)
+      fn* (es) :
+        append(CharList(String(1,char(e))), es))
+  else : ConsList(e, es)
+
+public defn* append (es1:ExpList, es2:ExpList) -> ExpList :
+  if empty?(es1) :
+    es2
+  else if empty?(es2) :
+    es1
+  else :
+    match(es1) :
+      (es1:AppendList) :
+        append(a(es1), append(b(es1), es2))
+      (es1:CharList) :
+        if-open-charlist?(es2,
+          fn* (es2) :
+            ;Add characters
+            for (c in chars(es1), i in 0 to n(es1)) do :
+              add(chars(es2), c)
+            ;Return new list
+            CharList(chars(es2), n(es2) + n(es1))
+          fn* (es2) :
+            AppendList(es1, es2))
+      (es1) :
+        AppendList(es1, es2)
+
+public defn to-exp-list (es:Seqable<Exp|ExpList>) -> ExpList :
+  match(es) :
+    (es:Vector<Exp|ExpList>) :
+      var accum:ExpList = ExpList()
+      for e in in-reverse(es) do :
+        accum = match(e) :
+                  (e:Exp) : cons(e, accum)
+                  (e:ExpList) : append(e, accum)
+      accum
+    (es) :
+      to-exp-list(to-vector<Exp|ExpList>(es))
+
+;                    Implementation
+;                    ==============
+
+;Empty List
+defmethod head (es:EmptyExpList) : fatal("Cannot call head on Empty List")
+defmethod tail (es:EmptyExpList) : fatal("Cannot call tail on Empty List")
+defmethod empty? (es:EmptyExpList) : true
+
+;Cons List
+defmethod empty? (es:ConsList) : false
+
+;Append List
+defmethod head (x:AppendList) : head(a(x))
+defmethod tail (x:AppendList) : append(tail(a(x)), b(x))
+defmethod empty? (x:AppendList) : empty?(a(x)) and empty?(b(x))
+
+;Char List
+defmethod head (es:CharList) :
+  #if-not-defined(OPTIMIZE) :
+    fatal("Inconsistent CharList") when n(es) == 0
+  CharExp(chars(es)[n(es) - 1])
+defmethod tail (es:CharList) :
+  #if-not-defined(OPTIMIZE) :
+    fatal("Inconsistent CharList") when n(es) == 0
+  if n(es) == 1 : ExpList()
+  else : CharList(chars(es), n(es) - 1)
+defmethod empty? (es:CharList) :
+  #if-not-defined(OPTIMIZE) :
+    fatal("Inconsistent CharList") when n(es) == 0
+  false
+
+defn* if-open-charlist? (es:ExpList, conseq:CharList -> ExpList, alt: ExpList -> ExpList) -> ExpList :
+  defn open? (es:CharList) :
+    n(es) == length(chars(es))
+  match(es) :
+    (es:CharList) :
+      if open?(es) : conseq(es)
+      else : alt(es)
+    (es:AppendList) :
+      match(a(es)) :
+        (a:CharList) :
+          if open?(a) : append(conseq(a), b(es))
+          else : alt(es)
+        (a) : alt(es)
+    (es) :
+      alt(es)
+
+defmethod to-seq (es:ExpList) :
+  generate<Exp> :
+    let loop (es:ExpList = es) :
+      match(es) :
+        (es:CharList) :
+          for i in (n(es) - 1) through 0 by -1 do :
+            yield(CharExp(chars(es)[i]))
+        (es:ConsList) :
+          yield(head(es))
+          loop(tail(es))
+        (es:AppendList) :
+          loop(a(es))
+          loop(b(es))
+        (es:EmptyExpList) :
+          false
+
+public defn seq-append<?T> (f: T -> ExpList, es:Seqable<?T>) -> ExpList :
+  append-all(seq(f, es))
+
+public defn seq-append<?T,?S> (f: (T,S) -> ExpList, xs:Seqable<?T>, ys:Seqable<?S>) -> ExpList :
+  append-all(seq(f, xs, ys))
+
+public defn append-all (es:Seqable<ExpList>) :
+  reduce-right(append{_:ExpList, _:ExpList}, es, ExpList())
+
+public defn* get (es:ExpList, i:Int) :
+  match(es) :
+    (es:AppendList) :
+      val alen = length(a(es))
+      if i < alen : a(es)[i]
+      else : b(es)[i - alen]
+    (es:CharList) :
+      fatal("Inconsistent CharList") when i >= n(es)
+      CharExp(chars(es)[n(es) - 1 - i])
+    (es) :
+      if i == 0 : head(es)
+      else : get(tail(es), i - 1)
+
+defmethod length (es:ExpList) :
+  let loop (accum:Int = 0, es:ExpList = es) :
+    match(es) :
+      (es:CharList) : n(es)
+      (es:ConsList) : loop(accum + 1, tail(es))
+      (es:AppendList) : loop(loop(accum, a(es)), b(es))
+      (es:EmptyExpList) : accum
+
+;============================================================
+;================== Expression Structure ====================
+;============================================================
+
+public deftype Exp
+public defstruct CharExp <: Exp :
+  char: Char
+public defstruct CommExp <: Exp :
+  name: Symbol
+  args: List<Arg>
+
+public defstruct Arg :
+  type: ArgType
+  exps: ExpList
+
+public deftype ArgType <: Equalable
+public defstruct GetArg <: ArgType
+public defstruct DoArg <: ArgType
+public defstruct AfnArg <: ArgType
+
+defmethod equal? (a:ArgType, b:ArgType) :
+  match(a, b) :
+    (a:GetArg, b:GetArg) : true
+    (a:DoArg, b:DoArg) : true
+    (a:AfnArg, b:AfnArg) : true
+    (a, b) : false
+
+defmethod print (o:OutputStream, e:Exp) :
+  print{o, _} $ match(e) :
+    (e:CharExp) : char(e)
+    (e:CommExp) : "\\%_%*" % [name(e), args(e)]
+
+defmethod print (o:OutputStream, a:Arg) :
+  val format = match(type(a)) :
+    (t:GetArg) : "[%_]"
+    (t:DoArg) : "(%_)"
+    (t:AfnArg) : "{%_}"
+  print(o, format % [exps(a)])
+
+public defn map<?T> (f: ExpList -> ExpList, e:?T&Exp) -> T :
+  {_ as Exp&T} $ match(e) :
+    (e:CharExp) : e
+    (e:CommExp) :
+      val args* = for a in args(e) map :
+        Arg(type(a), f(exps(a)))
+      CommExp(name(e), args*)
+
+;============================================================
+;==================== Parsing Algorithm =====================
+;============================================================
+
+public defn parse (s:String) :
+  parse(StringInputStream(s))
+
+public defn parse-file (filename:String) :
+  parse(StringInputStream(slurp(filename), filename))
+
+defn parse (stream:StringInputStream) -> ExpList :
+  ;===== Helpers =====
+  ;Read an argument type or fail.
+  defn read-arg-type () :
+    defn return (t:ArgType) : (get-char(stream), t)
+    switch(peek?(stream)) :
+      '(' : return(DoArg())
+      '[' : return(GetArg())
+      '{' : return(AfnArg())
+      else : false
+
+  ;Corresponding closing character for an argument type.
+  defn closing-char (t:ArgType) :
+    match(t) :
+      (t:GetArg) : ']'
+      (t:DoArg) : ')'
+      (t:AfnArg) : '}'
+
+  ;Specification of what a symbol character is.
+  val symbol-chars = BitArray(256, false)
+  for c in "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_" do :
+    symbol-chars[to-int(c)] = true
+  defn symbol-char? (c:Char|False) :
+    match(c:Char) : symbol-chars[to-int(c)]
+
+  ;Specification of what an opening character is.
+  defn open-char? (c:Char|False) :
+    contains?("([{", c)
+
+  ;Escape table
+  val escape-table = Array<Char|False>(256, false)
+  val escape-entries = [
+    ['t' '\t']
+    ['b' '\b']
+    ['r' '\r']
+    ['n' '\n']
+    ['{' '{']
+    ['}' '}']
+    ['[' '[']
+    [']' ']']
+    ['(' '(']
+    [')' ')']]
+  for [c1, c2] in escape-entries do :
+    escape-table[to-int(c1)] = c2
+  defn escape-char? (c:Char|False) :
+    match(c:Char) : escape-table[to-int(c)]
+
+  ;Read a symbol
+  defn read-symbol () :
+    val s = StringBuffer()
+    while symbol-char?(peek?(stream)) :
+      add(s, get-char(stream) as Char)
+    throw(NoSymbol(info(stream))) when empty?(s)
+    to-symbol(s)
+
+  ;Exp buffer
+  val exp-accum = Vector<Exp>()
+
+  ;Specifies what characters are scope characters
+  val scope-chars = BitArray(256, false)
+  for c in "#$@^" do :
+    scope-chars[to-int(c)] = true
+  defn scope-char? (c:Char|False) :
+    match(c:Char) : scope-chars[to-int(c)]
+
+  ;===== Main Algorithm =====
+  ;Read a command (assume \E has been read)
+  defn read-command () :
+    defn read-args () :
+      match(read-arg-type()) :
+        (t:ArgType) :
+          val es = read-exps(closing-char(t))
+          cons(Arg(t,es), read-args())
+        (t:False) : List()
+    val e = CommExp(read-symbol(), read-args())
+    if empty?(args(e)) :
+      val c0 = peek?(stream,0)
+      val c1 = peek?(stream,1)
+      get-char(stream) when c0 == ' ' and (symbol-char?(c1) or open-char?(c1))
+    e
+
+  ;Read a list of expressions
+  defn read-exps (end-char:False|Char) :
+    ;Current scoped escape
+    val scope-escape = Vector<Char>()
+    defn read-backslash? (c:Char) :
+      if c == '\\' :
+        if empty?(scope-escape) :
+          get-char(stream) ;Eat \
+          true
+        else if peek(scope-escape) == peek?(stream,1) :
+          get-char(stream) ;Eat \
+          get-char(stream) ;Eat #
+          true
+    defn read-end-char? (c:Char) :
+      match(end-char:Char) :
+        if empty?(scope-escape) :
+          if c == end-char :
+            get-char(stream) ;Eat }
+            true
+        else if c == peek(scope-escape) and peek?(stream,1) == end-char :
+          get-char(stream) ;Eat #
+          get-char(stream) ;Eat }
+          true
+
+    val num-exps = length(exp-accum)
+    defn* loop () :
+      match(peek?(stream)) :
+        (c:False) :
+          ;Reached end of stream
+          if end-char is Char :
+            throw(UnmatchedBrace(info(stream), end-char as Char))
+        (c:Char) :
+          ;Ending character
+          if read-end-char?(c) :
+            false
+          ;Back slash
+          else if read-backslash?(c) :
+            ;Char following back slash
+            val c2 = peek?(stream)
+            val c3 = peek?(stream,1)
+            ;Escaped back slash
+            if c2 == '\\' :
+              read-char-exp()
+            ;Escape character
+            else if c2 == '%' :
+              read-escape-char-exp()
+            ;End escaped scope
+            else if c2 == '}' :
+              end-scope-escape()
+            ;Begin Escaped scope
+            else if scope-char?(c2) and c3 == '{' :
+              begin-scope-escape()
+            ;Command
+            else :
+              read-comm-exp()
+          ;Some other character
+          else : read-char-exp()
+    defn* read-comm-exp () :
+      add(exp-accum, read-command())
+      loop()
+    defn* read-char-exp () :
+      add(exp-accum, CharExp(get-char(stream) as Char))
+      loop()
+    defn* read-escape-char-exp () :
+      get-char(stream) ;Eat %
+      val c = get-char(stream)
+      match(escape-char?(c)) :
+        (c:Char) : add(exp-accum, CharExp(c))
+        (_:False) : throw(InvalidEscapeSpecifier(info(stream), c))
+      loop()
+    defn* begin-scope-escape () :
+      val c = get-char(stream) as Char ;Eat #
+      get-char(stream) ;Eat {
+      add(scope-escape, c)
+      loop()
+    defn* end-scope-escape () :
+      throw(NoEscapeScope(info(stream))) when empty?(scope-escape)
+      val c = get-char(stream) ;Eat }
+      pop(scope-escape)
+      loop()
+
+    ;Start loop and collect results
+    loop()
+    var result:ExpList = ExpList()
+    while length(exp-accum) > num-exps :
+      result = cons(pop(exp-accum), result)
+    result
+
+  ;Driver
+  read-exps(false)
+
+;============================================================
+;======================= Exceptions =========================
+;============================================================
+
+public defstruct UnmatchedBrace <: Exception : (info:FileInfo, char:Char)
+defmethod print (o:OutputStream, e:UnmatchedBrace) :
+  print(o, "%_: Unmatched closing bracket. Expecting a %_." % [info(e), char(e)])
+
+public defstruct NoSymbol <: Exception : (info:FileInfo)
+defmethod print (o:OutputStream, e:NoSymbol) :
+  print(o, "%_: Expected a symbol to indicate command." % [info(e)])
+
+public defstruct NoEscapeScope <: Exception : (info:FileInfo)
+defmethod print (o:OutputStream, e:NoEscapeScope) :
+  print(o, "%_: Not in an escaped scope." % [info(e)])
+
+public defstruct InvalidEscapeSpecifier <: Exception : (info:FileInfo, char:Char|False)
+defmethod print (o:OutputStream, e:InvalidEscapeSpecifier) :
+  print{o, _} $ match(char(e)) :
+    (c:Char) : "%_: Invalid escape specifier %~." % [info(e), c]
+    (c:False) : "%_: Expected escape specifier after \\%." % [info(e)]
+
+public defstruct WebgenException <: Exception : (msg)
+defmethod print (o:OutputStream, e:WebgenException) :
+  print(o, msg(e))
+
+defn wex (msg) : throw(WebgenException(msg))
+
+;============================================================
+;================== Unification Algorithm ===================
+;============================================================
+
+defn binder? (e:Exp, binders:List<Symbol>) :
+  match(e:CommExp) :
+    empty?(args(e)) and contains?(binders,name(e))
+
+defn unify-char? (es:ExpList, binders:List<Symbol>) :
+  if empty?(es) : true
+  else :
+    match(head(es)) :
+      (e:CharExp) : true
+      (e:CommExp) : binder?(e, binders)
+
+protected defn unify (xs:ExpList, ys:ExpList, binders:List<Symbol>) :
+  ;Accumulate bindings here
+  val bindings = Vector<KeyValue<Symbol,ExpList>>()
+
+  ;Helper functions
+  defn binder-name (e:Exp) :
+    name(e as CommExp)
+  defn same-name? (x:CommExp, y:CommExp) :
+    name(x) == name(y)
+  defn same-length? (x:CommExp, y:CommExp) :
+    length(args(x)) == length(args(y))
+
+  ;Unify a list of expressions against another list
+  defn unify (xs:ExpList, ys:ExpList, allow-rest?) -> ExpList :
+    ;Case 1 of 2: End of binding pattern
+    if empty?(xs) :
+      if not allow-rest? :
+        fail() when not empty?(ys)
+      ys
+    ;Case 2 of 2: More binding patterns
+    else :
+      val x = head(xs)
+      ;Case 1 of 2: Attempt bind
+      if binder?(x, binders) :
+        ;Case 1 of 2: Undelimited Binder
+        if empty?(tail(xs)) :
+          add(bindings, binder-name(x) => ys)
+          ExpList()
+        ;Case 2 of 2: Delimited Binder
+        else :
+          val [a b] = first-unify(tail(xs), ys, allow-rest?)
+          add(bindings, binder-name(x) => a)
+          b
+      ;Case 2 of 2: Attempt Match
+      else :
+        ;Unification failure if no more values
+        fail() when empty?(ys)
+        ;Unify heads
+        match(x, head(ys)) :
+          ;Case 1 of 3: Unifying literals
+          (x:CharExp, y:CharExp) :
+            fail() when char(x) != char(y)
+          ;Case 2 of 3: Unifying commands
+          (x:CommExp, y:CommExp) :
+            ;Fail if structure does not match
+            fail() when not (same-name?(x,y) and same-length?(x,y))
+            ;Unify arguments
+            unify(args(x), args(y))
+          ;Case 3 of 3: Unification failure
+          (x, y) : fail()
+        ;Unify tails
+        unify(tail(xs), tail(ys), allow-rest?)
+
+  ;Unifying list of args
+  defn unify (xs:List<Arg>, ys:List<Arg>) :
+    for (x in xs, y in ys) do :
+      fail() when type(x) != type(y)
+      unify(exps(x), exps(y), false)
+
+  ;Find the first unification of xs with ys
+  ;Returns list before and after unification
+  defn first-unify (xs:ExpList, ys:ExpList, allow-rest?:True|False) -> [ExpList, ExpList] :
+    ;Fail if nothing more to match
+    fail() when empty?(ys)
+    if AppendCharList?(ys) and not unify-char?(xs, binders) :
+      val [a b] = first-unify(xs, b!(ys), allow-rest?)
+      val a* = append(a!(ys), a)
+      [a*, b]
+    else :
+      attempt :
+        val b = unify(xs, ys, allow-rest?)
+        [ExpList(), b]
+      else :
+        val [a b] = first-unify(xs, tail(ys), allow-rest?)
+        val a* = cons(head(ys), a)
+        [a*, b]
+
+  ;Unify and return bindings
+  val b = unify(xs, ys, true)
+  [bindings, b]
+
+;============================================================
+;================ Substitution Algorithm ====================
+;============================================================
+
+defn substitute-exps (pattern:ExpList, env:Collection<KeyValue<Symbol,ExpList>>) :
+  ;Is es a single command expression
+  defn ensure-single-comm! (es:ExpList) :
+    if length(es) != 1 or head(es) is-not CommExp :
+      wex("Cannot substitute in %_." % [es])
+    head(es) as CommExp
+  ;Substitution function
+  defn* sub (exps:ExpList) -> ExpList :
+    match(exps) :
+      (exps:AppendList) :
+        AppendList(sub(a(exps)), sub(b(exps)))
+      (exps:CharList) :
+        exps
+      (exps) :
+        if empty?(exps) :
+          ExpList()
+        else :
+          match(head(exps)) :
+            (e:CharExp) :
+              cons(e, sub(tail(exps)))
+            (e:CommExp) :
+              val e* = map(sub, e) as CommExp
+              match(lookup?(env, name(e))) :
+                (s:ExpList) :
+                  val head* = 
+                    if empty?(args(e*)) :
+                      s
+                    else :
+                      val s* = ensure-single-comm!(s)
+                      ExpList(CommExp(name(s*), append(args(s*), args(e*))))
+                  append(head*, sub(tail(exps)))
+                (s:False) :
+                  cons(e*, sub(tail(exps)))
+  ;Driver
+  sub(pattern)
+
+public defn substitute (pattern:ExpList, env:Collection<KeyValue<Symbol,?>>) :
+  val env* = to-tuple $ for e in env seq :
+    key(e) => match(value(e)) :
+      (v:ExpList) : v
+      (v) : parse(to-string(v))
+  substitute-exps(pattern, env*)
+
+;============================================================
+;========================= Function =========================
+;============================================================
+
+protected defstruct Function :
+  pattern: ExpList
+  binders: List<Symbol>
+  action: (Environment, Collection<KeyValue<Symbol,ExpList>>) -> ExpList
+
+;============================================================
+;===================== Environment ==========================
+;============================================================
+
+deftype Environment
+defmulti unify (e:Environment, es:ExpList) -> UnifyResult
+defmulti unify-char? (e:Environment) -> True|False
+
+defn flatten<T> (xs) -> Seqable<T> :
+  match(xs) :
+    (xs:Seqable) : seq-cat(flatten<T>{_}, xs)
+    (x:T) : [x]
+
+defn Environment (functions0) :
+  ;Flatten and create functions
+  val functions = to-tuple(flatten<Function>(functions0))
+
+  ;Compute whether any function can match against a character
+  val unify-char? = for f in functions any? :
+    unify-char?(pattern(f), binders(f))
+        
+  new Environment :
+    defmethod unify (this, es:ExpList) :
+      val r = for f in functions first :
+        attempt :
+          val [bindings, rest] = unify(pattern(f), es, binders(f))
+          One(UnifyResult(f, bindings, rest))
+        else : None()
+      if empty?(r) : fail()
+      else : value!(r)
+
+    defmethod print (o:OutputStream, this) :
+      print(o, "{")
+      for f in functions do :
+        print(o, "%*, " % [pattern(f)])
+      print(o, "}")
+      
+    defmethod unify-char? (this) :
+      unify-char?
+
+defn append (a:Environment, b:Environment) :
+  new Environment :
+    defmethod unify (this, es:ExpList) :
+      attempt : unify(b, es)
+      else : unify(a, es)
+    defmethod unify-char? (this) :
+      unify-char?(a) or unify-char?(b)
+
+protected defn Environment (a:Environment, fs) :
+  append(a, Environment(fs))
+
+defstruct UnifyResult :
+  function: Function
+  entries: Collection<KeyValue<Symbol,ExpList>>
+  rest: ExpList
+
+;============================================================
+;================== Expansion Algorithm =====================
+;============================================================
+
+protected defn expand (e:Environment, exps:ExpList) -> ExpList :    
+  val accum = Vector<Exp|ExpList>()
+  let loop (exps:ExpList = exps) :
+    if not empty?(exps) :
+      if AppendCharList?(exps) and not unify-char?(e) :
+        add(accum, a!(exps))
+        loop(b!(exps))
+      else if exps is CharList and not unify-char?(e) :
+        add(accum, exps)
+      else :
+        loop $ 
+          attempt :
+            val r = unify(e, exps)
+            add(accum, action(function(r))(e, entries(r)))
+            rest(r)
+          else :
+            add(accum, map(expand{e, _}, head(exps)))
+            tail(exps)
+  to-exp-list(accum)
+
+protected defn expand-level (e:Environment, exps:ExpList) -> ExpList :    
+  val accum = Vector<Exp|ExpList>()
+  let loop (exps:ExpList = exps) :
+    if not empty?(exps) :
+      if AppendCharList?(exps) and not unify-char?(e) :
+        add(accum, a!(exps))
+        loop(b!(exps))
+      else if exps is CharList and not unify-char?(e) :
+        add(accum, exps)
+      else :
+        loop $ 
+          attempt :
+            val r = unify(e, exps)
+            add(accum, action(function(r))(e, entries(r)))
+            rest(r)
+          else :
+            add(accum, head(exps))
+            tail(exps)
+  to-exp-list(accum)
+
+;============================================================
+;==================== Basic Functions =======================
+;============================================================
+
+public defn sub-function (name:Symbol, sub) :
+  val sub* = match(sub) :
+    (sub:ExpList) : sub
+    (sub) : #PAT: sub
+  webfn "\\%_" % [name] () :
+    expand(sub*)
+
+public defn bool-functions (name:Symbol, c:True|False) :
+ [webfn \<P>\%_{\conseq}<P> % [name] (conseq) :
+    if c : expand(conseq)
+    else : ExpList()
+  webfn \<P>\%_{\conseq}{\alt}<P> % [name] (conseq, alt) :
+    if c : expand(conseq)
+    else : expand(alt)]
+
+;============================================================
+;=================== Base Environment =======================
+;============================================================
+
+public val WEBGEN-ENVIRONMENT = Environment([])
+
+;============================================================
+;====================== Utilities ===========================
+;============================================================
+
+defn a! (es:ExpList) : a(es as AppendList)
+defn b! (es:ExpList) : b(es as AppendList)
+
+defn AppendCharList? (es:ExpList) :
+  match(es:AppendList) : a(es) is CharList
+
+;Retrieve the list of binders
+public defn exp-binders (es:ExpList) :
+  to-list $ for e in es seq? :
+    match(e) :
+      (e:CharExp) :
+        None()
+      (e:CommExp) :
+        wex("Bad binder: %*" % [es]) when not empty?(args(e))
+        One(name(e))
+
+public defn exp-binder (es:ExpList) :
+  val bs = exp-binders(es)
+  if length(bs) != 1 : wex("Not a single binder: %*" % [es])
+  head(bs)
+
+;Retrieve expression as string
+public defn exp-string (es:ExpList) :
+  String $ for e in es seq :
+    match(e:CharExp) : char(e)
+    else : wex("Not a string: %*" % [es])
+
+;============================================================
+;==================== Let Expansion =========================
+;============================================================
+
+;Retrieve the defs in a list of expressions
+defn scan-defs (es:ExpList) :
+  for e in es seq? :
+    match(e:CommExp) :
+      match-template(ExpList(e)) :
+        \<P>\def[\pat](\binders){\body}<P> (pat binders body) :
+          One([pat, exp-binders(binders), body])
+        else : wex("Bad def: %_" % [e])
+    else : None()
+
+defn scan-functions (e:Environment, es:ExpList) :
+  for [pat, binders, body] in scan-defs(es) seq :
+    Function(pat, binders,
+      fn (env, bindings) :
+        val subs = for x in binders map :
+          x => expand(env, lookup(bindings, x))
+        expand(e, substitute(body, subs)))
+
+defn scan-macros (es:ExpList) :
+  for [pat, binders, body] in scan-defs(es) seq :
+    Function(pat, binders,
+      fn (env, bindings) :
+        val subs = for x in binders map :
+          x => expand(env, lookup(bindings, x))
+        substitute(body, subs))
+
+public defn let-functions () : 
+ [Function(
+    parse(\<P>\let{\defs}\in{\body}<P>)
+    `(defs body)
+    fn (env, bindings) :
+      val defs = lookup(bindings, `defs)
+      val body = lookup(bindings, `body)
+      val env* = Environment(env, scan-functions(env, defs))
+      expand(env*, body))
+  Function(
+    parse(\<P>\sub{\defs}\in{\body}<P>)
+    `(defs body)
+    fn (env, bindings) :
+      val defs = lookup(bindings, `defs)
+      val body = lookup(bindings, `body)
+      val env* = Environment(scan-macros(defs))
+      val body* = expand(env*, body)
+      expand(env, body*))]
+
+public defn expand-lets (es:ExpList) :
+  web-let :
+    let-functions()
+  in: expand(es)  
+
+;============================================================
+;===================== HTML EXPANSION =======================
+;============================================================
+
+public defn html-functions () :
+  val tag-table = to-hashtable<Symbol,String> $
+   [`headT => "head"
+    `htmlT => "html"
+    `styleT => "style"
+    `titleT => "title"
+    `bodyT => "body"
+    `tableT => "table"
+    `spanT => "span"
+    `h1T => "h1"
+    `h2T => "h2"
+    `h3T => "h3"
+    `h4T => "h4"
+    `pT => "p"
+    `divT => "div"
+    `imgT => "img"
+    `trT => "tr"
+    `tdT => "td"
+    `aT => "a"
+    `brT => "br"
+    `linkT => "link"
+    `codeT => "code"
+    `preT => "pre"
+    `ulT => "ul"
+    `olT => "ol"
+    `liT => "li"
+    `dlT => "dl"]
+    
+  defn get-tag (name:Symbol) :
+    match(get?(tag-table, name)) :
+      (tag:String) : tag
+      (tag:False) : wex("Invalid html tag: %_" % [name])
+      
+  defn generic-tag-fns () :
+   [webfn \<P>\tag(\name)[\attrib]{\body}<P> (name, attrib, body) :
+      val tag = get-tag(exp-binder(name))
+      substitute(#PAT: \<P>\raw{<%_ \attrib>}\body\raw{</%_>}<P> % [tag, tag], [
+        `body => expand(body)
+        `attrib => expand(attrib)])
+    webfn \<P>\tag(\name){\body}<P> (name, body) :
+      val tag = get-tag(exp-binder(name))
+      substitute(#PAT: \<P>\raw{<%_>}\body\raw{</%_>}<P> % [tag, tag], [
+        `body => expand(body)])]
+  defn tag-fns (name:Symbol, tag:String) :
+   [webfn \<P>\%_[\attrib]{\body}<P> % [name] (attrib, body) :
+      substitute(#PAT: \<P>\raw{<%_ \attrib>}\body\raw{</%_>}<P> % [tag, tag], [
+        `body => expand(body)
+        `attrib => expand(attrib)])
+    webfn \<P>\%_{\body}<P> % [name] (body) :
+      substitute(#PAT: \<P>\raw{<%_>}\body\raw{</%_>}<P> % [tag, tag], [
+        `body => expand(body)])
+    webfn \<P>\%_[\attrib]<P> % [name] (attrib) :
+      substitute(#PAT: \<P>\raw{<%_ \attrib>}<P> % [tag], [
+        `attrib => expand(attrib)])
+    webfn \<P>\%_<P> % [name] () :
+      #PAT: \<P>\raw{<%_>}<P> % [tag, tag]]
+  defn tag-fns () :
+    for entry in tag-table seq-cat :
+      tag-fns(key(entry), value(entry))
+
+  cat(generic-tag-fns()
+      tag-fns())
+
+public defn expand-html (es:ExpList) :
+  web-let :
+    html-functions()
+  in: expand(es)
+
+;============================================================
+;===================== Sanitization =========================
+;============================================================
+
+val CLEAN-TABLE = Array<False|String>(256,false)
+CLEAN-TABLE[to-int('\n')] = "<br>"
+CLEAN-TABLE[to-int('&')] = "&amp;"
+CLEAN-TABLE[to-int('<')] = "&lt;"
+CLEAN-TABLE[to-int('>')] = "&gt;"
+CLEAN-TABLE[to-int('\'')] = "&#39;"
+CLEAN-TABLE[to-int('\"')] = "&quot;"
+
+public defn print-expressions (es:ExpList) :  
+  let loop (es:ExpList = es, clean?:True|False = false) :
+    if not empty?(es) :
+      match(head(es)) :
+        (e:CharExp) :
+          if clean? :
+            if char(e) == ' ' :
+              defn space? (e:Exp) : match(e:CharExp) : char(e) == ' '
+              if empty?(tail(es)) or space?(es[1]) : print("&nbsp;")
+              else : print(char(e))
+            else :
+              match(CLEAN-TABLE[to-int(char(e))]) :
+                (s:String) : print(s)
+                (s:False) : print(char(e))
+          else : print(char(e))
+          loop(tail(es), clean?)
+        (e:CommExp) :
+          match-template(es) :
+            \<P>\clean{\text}<P> (text) :
+              loop(text, true)
+              loop(rest, clean?)
+            \<P>\raw{\text}<P> (text) :
+              loop(text, false)
+              loop(rest, clean?)
+            else :
+              wex("Unsupported tag: %_" % [e])
+
+;============================================================
+;=================== Latex Sanitization =====================
+;============================================================
+
+val LATEX-TABLE = Array<False|String>(256,false)
+LATEX-TABLE[to-int('#')] = "\\#"
+LATEX-TABLE[to-int('_')] = "\\_"
+LATEX-TABLE[to-int('$')] = "\\$"
+LATEX-TABLE[to-int('%')] = "\\%"
+LATEX-TABLE[to-int('^')] = "\\^"
+LATEX-TABLE[to-int('&')] = "\\&"
+LATEX-TABLE[to-int('{')] = "\\{"
+LATEX-TABLE[to-int('}')] = "\\}"
+LATEX-TABLE[to-int('\\')] = "\\textbackslash "
+LATEX-TABLE[to-int('~')] = "\\textasciitilde "
+
+public defn print-latex (es:ExpList) :  
+  let loop (es:ExpList = es, clean?:True|False = true) :
+    if not empty?(es) :
+      match(head(es)) :
+        (e:CharExp) :
+          if clean? :
+            match(LATEX-TABLE[to-int(char(e))]) :
+              (s:String) : print(s)
+              (s:False) : print(char(e))
+          else : print(char(e))
+          loop(tail(es), clean?)
+        (e:CommExp) :
+          match-template(es) :
+            \<P>\clean{\text}<P> (text) :
+              loop(text, true)
+              loop(rest, clean?)
+            \<P>\raw{\text}<P> (text) :
+              loop(text, false)
+              loop(rest, clean?)
+            else :
+              wex("Unsupported tag: %_" % [e])
+
+;============================================================
+;===================== Item Scanning ========================
+;============================================================
+
+public defn scan-item-functions () :
+ [webfn \<P>\scan_items[\start]{\body}<P> (start body) :
+    val start* =
+      match(to-int(exp-string(start))) :
+        (i:Int) : i
+        (i:False) : throw $ WebgenException("Bad starting index.")
+    expand(scan-items(body, start*))
+  webfn \<P>\scan_items{\body}<P> (body) :
+    expand(scan-items(body, false))]
+
+defn scan-items (es:ExpList, start:Int|False) -> ExpList :
+  val texts = generate :
+    let loop (text:ExpList = es, n:Int = -1) :
+      match-template(text) :
+        \<P>\text\item<P> (text) :
+          ;If after the first one
+          yield(text) when n >= 0
+          loop(rest, n + 1)
+        else :
+          yield(text) when n >= 0
+  for (text in texts, i in 0 to false) seq-append :
+    match(start:Int) :
+      substitute(#PAT: \<P>\item[\i]{\text}<P>, [
+        `i => i + start
+        `text => text])
+    else :
+      substitute(#PAT: \<P>\item{\text}<P>, [
+        `text => text])
+
+;============================================================
+;============================================================
+;========================= DEBUG ============================
+;============================================================
+;============================================================
+
+;defn ContextFunction (name:Symbol, ctxt:Environment) :
+;  val pat = parse(to-string("\\%_{\\text}" % [name]))
+;  Function(pat, `(text),
+;    fn (env, bindings) :
+;      val text* = expand(ctxt, lookup(bindings, `text))
+;      List(CommExp(name, List(Arg(AfnArg(), text*)))))
+
+;defn expand (exps:List<Exp>, fs:Collection<Function>) :
+;  expand(Environment(fs), exps)  
+;
+;;============================================================
+;;======================== Listing ===========================
+;;============================================================
+;
+;defn scan-items (es:List<Exp>, start:Int) :
+;  val texts = Vector<List<Exp>>()
+;  defn scan (text:List<Exp>) :
+;    attempt :
+;      val [bs, r] = unify(parse(\<P>\text\item <P>), text, `(text))
+;      add(texts, lookup(bs,`text))
+;      scan(r)
+;    else :
+;      add(texts, text)
+;  attempt :
+;    val [bs, r] = unify(parse(\<P>\text\item <P>), es, `(text))
+;    scan(r)
+;    for (text in texts, i in start to false) seq-append :
+;      substitute(\<P>\item[\i]{\text}<P>, [
+;        `i => i
+;        `text => text
+;      ])
+;  else :
+;    fatal("No \\item in list: %*" % [es])
+;
+;val SCAN-ITEMS-FUNCTION = Function(
+;  parse(\<P>\scan_items[\start]{\body}<P>)
+;  `(start body)
+;  fn (env, bindings) :
+;    val start = to-int(exp-string(lookup(bindings, `start))) as Int
+;    val body = scan-items(lookup(bindings, `body), start)
+;    expand(env, body))
+;
+;;============================================================
+;;======================= Anchoring ==========================
+;;============================================================
+;
+;defstruct Anchor :
+;  level: Int
+;  anchor: List<Exp>
+;  text: List<Exp>
+;
+;defn anchor (es:List<Exp>) :
+;  val anchors = Vector<Anchor>()
+;  defn anchor-fn (name:String, level:Int) :
+;    val pat = parse(to-string(\<P>\%_{\text}<P> % [name]))
+;    val pat* = parse(to-string(\<P>\%_[\anchor]{\text}<P> % [name]))
+;    Function(pat, `(text),
+;      fn (env, bindings) :
+;        val anchor = parse(to-string("anchor%_" % [genid()]))
+;        add(anchors, Anchor(level, anchor, lookup(bindings, `text)))
+;        val new-bindings = [
+;          `anchor => anchor]
+;        val bindings* = to-list(cat(new-bindings, bindings))        
+;        substitute(bindings*, pat*))
+;  val env = Environment $ [
+;    anchor-fn("header", 0)
+;    anchor-fn("subheader", 1)]
+;  val result = expand(env, es)
+;  [result, anchors]
+;
+;;============================================================
+;;====================== Scan Pages ==========================
+;;============================================================
+;
+;defstruct Page :
+;  type: Symbol
+;  pagename: String|False
+;  filename: String
+;defmethod print (o:OutputStream, p:Page) :
+;  print(o, "Page(%~, %~, %~)" % [type(p), pagename(p), filename(p)])
+;
+;defn raw-name (p:Page) :
+;  val suffix = ".gen"
+;  if suffix?(filename(p), suffix) :
+;    val n = length(filename(p))
+;    filename(p)[0 to n - length(suffix)]
+;  else :
+;    fatal("Bad filename: %_" % [filename(p)])
+;
+;defn string? (es:List<Exp>, s:String) :
+;  attempt :
+;    unify(parse(s), es, `())
+;    true    
+;
+;defn exp-string (es:List<Exp>) :
+;  String $ for e in es seq :
+;    match(e:CharExp) : char(e)
+;    else : fatal("Not a string: %*" % [es])
+;
+;defn scan-pages (es:List<Exp>) :
+;  val pages = Vector<Page>()
+;  val env = Environment $ [
+;    Function(parse(\<P>\page(\type)[\name]{\filename}<P>), `(type name filename),
+;      fn (env, bindings) :
+;        val type = lookup(bindings, `type)
+;        val name = lookup(bindings, `name)
+;        val filename = lookup(bindings, `filename)
+;        val type* = switch string?{type, _} :
+;          "main" : `main
+;          "api" : `api
+;          else : fatal("Bad page type: %*" % [type])
+;        add(pages, Page(type*, exp-string(name), exp-string(filename)))
+;        List())
+;    Function(parse(\<P>\innerpage(\type){\filename}<P>), `(type filename),
+;      fn (env, bindings) :
+;        val type = lookup(bindings, `type)
+;        val filename = lookup(bindings, `filename)
+;        val type* = switch string?{type, _} :
+;          "main" : `main
+;          "api" : `api
+;          else : fatal("Bad page type: %*" % [type])
+;        add(pages, Page(type*, false, exp-string(filename)))
+;        List())
+;  ]
+;  expand(env, es)
+;  pages
+;
+;;============================================================
+;;==================== Pages Command =========================
+;;============================================================
+;
+;defn pages-function (active-page:String, pages:Collection<Page>) :  
+;  Function(parse(\<P>\pages{\text}<P>), `(text),
+;    fn (env, bindings) :
+;      val text = lookup(bindings, `text)
+;      for p in pages seq-append :
+;        match(pagename(p)) :
+;          (pagename:False) :
+;            List()
+;          (pagename:String) :
+;            expand(text, [
+;              sub-function(`name, parse(pagename))
+;              sub-function(`filename, parse(raw-name(p)))
+;              bool-function(`active, active-page == pagename)]))
+;
+;defn sub-function (name:Symbol, sub:List<Exp>) :
+;  Function(List(CommExp(name,List())), `(),
+;    fn (env, bindings) : sub)
+;
+;defn bool-function (name:Symbol, c:True|False) :
+;  val pat = parse(to-string(\<P>\%_{\conseq}<P> % [name]))
+;  Function(pat, `(conseq),
+;    fn (env, bindings) :
+;      if c : lookup(bindings, `conseq)
+;      else : List())
+;
+;defn if-function (name:Symbol, c:True|False) :
+;  val pat = parse(to-string(\<P>\%_{\conseq}{\alt}<P> % [name]))
+;  Function(pat, `(conseq alt),
+;    fn (env, bindings) :
+;      if c : lookup(bindings, `conseq)
+;      else : lookup(bindings, `alt))
+;
+;;============================================================
+;;==================== Sections Command ======================
+;;============================================================
+;
+;defn sections-function (anchors:Collection<Anchor>) :
+;  defn type (i:Int) :
+;    switch(i) :
+;      0 : `h1T
+;      1 : `h2T
+;      2 : `h3T
+;      
+;  Function(parse(\<P>\sections{\text}<P>), `(text),
+;    fn (env, bindings) :
+;      val sec-text = lookup(bindings, `text)
+;      for a in anchors seq-append :
+;        expand(sec-text, [
+;          sub-function(`anchor, anchor(a))
+;          sub-function(`name, text(a))
+;          sub-function(`type, List(CommExp(type(level(a)), List())))]))
+;
+;;============================================================
+;;======================== Test Code =========================
+;;============================================================
+;
+;defn mainpage (template:String) :
+;  ;Parse main template
+;  val form = parse-file(template)
+;  val [pages, mainbody, page-binder, page-body] = 
+;    attempt :
+;      val main-pat = parse $ string-join $ [
+;        \<P>\pages{\pagestext}\fill0<P>
+;        \<P>\mainpage{\mainbody}\fill1<P>        
+;        \<P>\page_style(\page_binders){\pagebody}<P>]
+;      val [bs, r] = unify(main-pat, form,
+;                          `(pagestext fill0
+;                            mainbody fill1
+;                            page_binders pagebody))
+;      [scan-pages(lookup(bs, `pagestext))
+;       lookup(bs, `mainbody)
+;       head(exp-binders(lookup(bs, `page_binders)))
+;       lookup(bs, `pagebody)]
+;    else :
+;      fatal("Bad template")
+;
+;  ;Make content page
+;  defn content-page (filename:String) :
+;    var form:List<Exp> = parse-file(filename)
+;    val [anchored, anchors] = anchor(form)
+;    form = anchored    
+;    form = substitute(page-body, [page-binder => form])
+;    val def-shorthand = parse(\<P>\def[\def[\pat](\bind){\defs}\in{\body}](\pat,\bind,\defs,\body){\def[\pat](\bind){\let{\defs}\in{\body}}}<P>)
+;    form = substitute(\<P>\sub{\shorthands}\in{\body}<P>, [
+;      `shorthands => def-shorthand
+;      `body => form])
+;    val content-env = Environment $ [
+;      LET-FUNCTION
+;      SUB-FUNCTION
+;      PARAGRAPHS-FUNCTION
+;      SCAN-ITEMS-FUNCTION]
+;    form = expand(content-env, form)
+;
+;    val base-env = Environment $ [
+;      pages-function("Philosophy", pages)
+;      sections-function(anchors)
+;      sub-function(`content, form)]
+;    expand(base-env, mainbody)
+;    
+;    
+;  val page0 = content-page("index.gen")
+;  do(print, page0)
+;  println("\n\n")
+;
+;mainpage(command-line-arguments()[1])
+;
+;;defn main () :
+;;  val pat = parse(\<P>\text{\body a}<P>)
+;;  val forms = parse(\<P>\text{Hahaha}<P>)
+;;  attempt :
+;;    println(unify(pat, forms, `(body)))
+;;  else :
+;;    println("No match")
+;;
+;;main()

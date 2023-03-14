@@ -1,0 +1,59 @@
+defpackage fwrapper :
+  import core
+
+deftype System
+defmulti next-id (s:System) -> Int
+defmulti state (s:System, p:Path) -> ?
+
+public deftype Path<T>
+public defmulti state<?T> (p:Path<?T>) -> T
+defmulti id (p:Path) -> Int
+defmulti system (p:Path) -> System
+
+defmulti parent (p:Path) -> Path
+defmulti patch (p:Path) -> Patch
+
+public deftype Patch<T>
+public defmulti apply<?T> (p:Patch<?T>, s:T) -> False
+public defmulti undo<?T> (p:Patch<?T>, s:T) -> False
+
+public defn Root<?T> (s0:?T) :
+  val id-counter = to-seq(0 to false)
+  val system-state = s0
+  var current-path
+
+  defn* sync (p:Path) :
+    if id(p) > id(current-path) :
+      sync(parent(p))
+      apply(patch(p), system-state)
+      current-path = p
+    else if id(p) < id(current-path) :
+      undo(patch(current-path), system-state)
+      current-path = parent(current-path)
+      sync(p)
+
+  val system = new System :
+    defmethod next-id (this) : next(id-counter)
+    defmethod state (this, p:Path) :
+      sync(p)
+      system-state
+
+  val root-id = next-id(system)
+  val root = new Path<T> :
+    defmethod id (this) : root-id
+    defmethod state (this) : state(system, this)
+    defmethod system (this) : system
+
+  current-path = root
+
+  root
+      
+public defn change<?T> (parent:Path<?T>, p:Patch<T>) :
+  val sys = system(parent)
+  val id* = next-id(sys)
+  new Path<T> :
+    defmethod id (this) : id*
+    defmethod system (this) : sys
+    defmethod state (this) : state(sys, this)
+    defmethod parent (this) : parent
+    defmethod patch (this) : p

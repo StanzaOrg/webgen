@@ -1,0 +1,8 @@
+package webgen defined-in "src/webgen.stanza"
+package fwrapper defined-in "src/fwrapper.stanza"
+package webgen-macros defined-in "src/webgen-macros.stanza"
+
+syntax-packages (webgen) defined-in "bin/webgen-macros"
+build-macros webgen-macros :
+  inputs: webgen-macros
+  o: "bin/webgen-macros"

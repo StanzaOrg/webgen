@@ -1,0 +1,136 @@
+defpackage webgen-macros :
+  import core  
+  import collections
+  import macro-utils
+  ;import core/parser
+  import stz/core-macros
+
+defsyntax webgen :
+  ;Imports
+  import (exp4, exp!, :!) from core
+  
+  ;Primitives
+  defproduction string: String|Token
+  defrule string = (?x) when unwrap-token(x) is String : x
+  defproduction symbol: Symbol|Token
+  defrule symbol = (?x) when unwrap-token(x) is Symbol : x
+  
+  ;Error handling
+  defn WE (info:False|FileInfo, msg) : WebgenException(info, msg)
+  defproduction string! : String|Token
+  defrule string! = (?x:#string) : x
+  fail-if string! = () : WE(closest-info(), "Expected a string here.")
+  
+  defproduction symbol! : Symbol|Token
+  defrule symbol! = (?x:#symbol) : x
+  fail-if symbol! = () : WE(closest-info(), "Expected a symbol here.")  
+
+  ;Utilities
+  defproduction binders!:List<Symbol|Token>
+  defrule binders! = ((?xs:#symbol! ...)) : xs
+  fail-if binders! = () : WE(closest-info(), "Expected a list of binders here.")
+
+  ;#PAT macro
+  defrule exp4 = (~ #PAT: ?e:#exp!) :
+    parse-syntax[core / #exp](qquote(webgen/parse(core/to-string(~ e))))
+  
+  ;Webgen macro
+  defn expand-webfn (p, bs:List<Symbol|Token>, body) :
+    val template = `(
+      webgen/Function(webgen/parse(core/to-string(pattern)), `(binders{x}),
+        fn (WEBGEN-ENVIRONMENT, bindings) :
+          defn* expand (exp:webgen/ExpList) : webgen/expand(WEBGEN-ENVIRONMENT, exp)
+          defn* expand-level (exp:webgen/ExpList) : webgen/expand-level(WEBGEN-ENVIRONMENT, exp)
+          binders{val x = core/lookup(bindings, `x)}
+          body))
+    fill-template(template, [
+      `pattern => p
+      `binders => repeated $ [`x => bs]
+      `bindings => gensym(`bindings)
+      `exp => gensym(`exp)
+      `body => body])
+    
+  defrule exp4 = (webfn ?p:#exp! ?bs:#binders! #:! ?body:#exp!) :
+    val result = expand-webfn(p, bs, body)
+    parse-syntax[core / #exp](result)
+
+  ;Match template macro
+  defrule exp4 = (match-template(?e:#exp!) #:! (?bs:#template-branch! ...)) :
+    defn gen-branches (bs:List<TemplateBranch|TemplateElseBranch>) :
+      if empty?(bs) :
+        substitute(`(fn* () : core/fatal("No branch for expression %_" % [exp])), [])
+      else :
+        match(head(bs)) :
+          (b:TemplateBranch) :
+            val template = `(
+              attempt :
+                val [bindings, rest] = webgen/unify(webgen/parse(to-string(pattern)), exp, `(binders{x}))
+                binders{val x = core/lookup(bindings, `x)}
+                fn* () : body
+              else :
+                else-clause)
+            substitute(template, [
+              `bindings => gensym(`bindings)
+              `pattern => pattern(b)
+              `binders => repeated $ [`x => binders(b)]
+              `body => body(b)
+              `else-clause => gen-branches(tail(bs))])          
+          (b:TemplateElseBranch) :
+            qquote(fn* () : ~ (body(b)))
+    val template = `(
+      let :
+        val exp = expression
+        branches())
+    val result = fill-template(template, [
+      `exp => deep(gensym(`exp))
+      `expression => e
+      `branches => gen-branches(bs)])
+    parse-syntax[core / #exp](result)
+  fail-if exp4 = (match-template) :
+    WE(closest-info(), "Incorrect syntax for match-template.")
+    
+  defproduction template-branch! : TemplateBranch|TemplateElseBranch
+  defrule template-branch! = (else #:! ?body:#exp!) :
+    TemplateElseBranch(body)
+  defrule template-branch! = (?p:#exp! ?bs:#binders! #:! ?body:#exp!) :
+    TemplateBranch(p, bs, body)
+  fail-if template-branch! = () :
+    WE(closest-info(), "Expected a template branch here.")
+
+  ;Web-let macro
+  defrule exp4 = (web-let #:! (?fs:#exp! ...) in #:! ?body:#exp!) :
+    val template = `(
+      let :
+        val WEBGEN-ENVIRONMENT = webgen/Environment(WEBGEN-ENVIRONMENT, [functions])
+        defn expand (exp:webgen/ExpList) : webgen/expand(WEBGEN-ENVIRONMENT, exp)
+        defn expand-level (exp:webgen/ExpList) : webgen/expand-level(WEBGEN-ENVIRONMENT, exp)
+        body)
+    val result = fill-template(template, [
+      `exp => gensym(`exp)
+      `functions => splice(fs)
+      `body => body])
+    parse-syntax[core / #exp](result)
+  fail-if exp4 = (web-let) :
+    WE(closest-info(), "Invalid syntax for web-let.")
+
+;Template Branch
+defstruct TemplateBranch: (pattern, binders:List, body)
+defstruct TemplateElseBranch: (body)
+
+;Generic webgen exception
+defstruct WebgenException <: Exception :
+  info: False|FileInfo
+  msg
+defmethod print (o:OutputStream, e:WebgenException) :
+  print{o, _} $ match(info(e)) :
+    (info:FileInfo) : "%_: %_" % [info, msg(e)]
+    (info:False) : msg(e)
+
+#if-defined(STANDALONE) :
+  defn main () :
+    val filename = command-line-arguments()[1]
+    val result = parse-syntax[core + webgen / #exp! ...](reader/read-file(filename))
+    println(";EXPANDED:")
+    println("%~" % [result])
+
+  main()
